@@ -533,7 +533,9 @@ function setSyncStatus(s){
   const dot = document.getElementById('syncDot'); const txt = document.getElementById('syncText');
   if(!dot) return;
   dot.className = 'sync-dot '+s;
-  txt.textContent = s==='ok'?'Synced to Drive':(s==='pending'?'Saving…':'Sync failed — will retry');
+  const pending = countPendingPhotos();
+  const base = s==='ok'?'Synced to Drive':(s==='pending'?'Saving…':'Sync failed — will retry');
+  txt.textContent = pending>0 ? base+` (${pending} photo${pending>1?'s':''} still uploading)` : base;
 }
 async function uploadPhoto(dataUrl, filenamePrefix){
   const blob = await (await fetch(dataUrl)).blob();
@@ -565,6 +567,7 @@ async function onSignedIn(){
     document.getElementById('userSub').textContent = 'signed in · synced';
     document.getElementById('driveFolderNote').textContent = `Data folder: "${APP_FOLDER_NAME}" in your Google Drive root.`;
     setSyncStatus('ok');
+    syncAllPendingPhotos();
   }catch(e){
     document.getElementById('userSub').textContent = 'signed in · offline mode';
     loadLocal();
@@ -580,9 +583,9 @@ function showView(name){
   document.getElementById('view-'+name).classList.add('active');
   document.querySelectorAll('nav.tabbar button').forEach(b=>b.classList.toggle('active', b.dataset.view===name));
   if(name==='add' && editingId===null) resetForm();
-  if(name==='report') renderReport();
+  if(name==='report'){ renderReport(); syncAllPendingPhotos(); }
   if(name==='fuel') renderFuel();
-  if(name==='log') renderLog();
+  if(name==='log'){ renderLog(); syncAllPendingPhotos(); }
   if(name==='dashboard') renderDashboard();
   window.scrollTo(0,0);
 }
@@ -686,6 +689,42 @@ async function tryUploadPhotos(){
     }
   }
 }
+
+/* Retries uploading any photo already attached to a SAVED entry that never
+   finished uploading (e.g. was offline / lost signal right after saving).
+   This is what actually clears "pending" photos over time. */
+let photoSyncRunning = false;
+async function syncAllPendingPhotos(){
+  if(!drive.signedIn || photoSyncRunning) return;
+  photoSyncRunning = true;
+  let changed = false;
+  try{
+    for(const entry of state.entries){
+      for(const key of ['ticketPhotos','billPhotos']){
+        const list = entry[key];
+        if(!list) continue;
+        for(const p of list){
+          if(!p.driveId && p.dataUrl){
+            try{
+              const r = await uploadPhoto(p.dataUrl, key==='ticketPhotos'?'ticket':'bill');
+              p.driveId = r.driveId; p.driveLink = r.driveLink; p.dataUrl = null;
+              changed = true;
+            }catch(e){ /* still offline or blocked — will retry next pass */ }
+          }
+        }
+      }
+    }
+  } finally {
+    photoSyncRunning = false;
+  }
+  if(changed){
+    saveLocal(); queueSync();
+    renderLog(); renderReport(); renderDashboard();
+    setSyncStatus('ok');
+    toast('Pending photos synced to Drive');
+  }
+}
+setInterval(syncAllPendingPhotos, 60000);
 
 document.getElementById('saveEntryBtn').addEventListener('click', async ()=>{
   const cat = document.getElementById('f_category').value;
@@ -1060,10 +1099,19 @@ document.getElementById('saveSettingsBtn').addEventListener('click', ()=>{
 });
 document.getElementById('forceSyncBtn').addEventListener('click', async ()=>{
   await tryUploadPhotos();
+  await syncAllPendingPhotos();
   await pushToDrive();
   renderAll();
   toast('Synced');
 });
+function countPendingPhotos(){
+  let n = 0;
+  state.entries.forEach(e=>{
+    (e.ticketPhotos||[]).forEach(p=>{ if(!p.driveId) n++; });
+    (e.billPhotos||[]).forEach(p=>{ if(!p.driveId) n++; });
+  });
+  return n;
+}
 document.getElementById('signOutBtn').addEventListener('click', signOut);
 
 /* ============================================================
